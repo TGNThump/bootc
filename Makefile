@@ -25,10 +25,6 @@
 
 prefix ?= /usr
 
-SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct)
-# https://reproducible-builds.org/docs/archives/
-TAR_REPRODUCIBLE = tar --mtime="@${SOURCE_DATE_EPOCH}" --sort=name --owner=0 --group=0 --numeric-owner --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime
-
 # Enable rhsm if we detect the build environment is RHEL-like.
 # We may in the future also want to include Fedora+derivatives as
 # the code is really tiny.
@@ -71,6 +67,9 @@ install:
 	if [ "$$ID" = "fedora" ] || [[ "$$ID_LIKE" == *"fedora"* ]]; then \
 	install -D -m 0755 -t $(DESTDIR)/$(prefix)/lib/bootc contrib/scripts/fedora-bootc-destructive-cleanup; \
 	fi
+	install -D -m 0644 -t $(DESTDIR)/usr/lib/systemd/system crates/initramfs/*.service
+	install -D -m 0755 target/release/bootc-initramfs-setup $(DESTDIR)/usr/lib/bootc/initramfs-setup
+	install -D -m 0755 -t $(DESTDIR)/usr/lib/dracut/modules.d/51bootc crates/initramfs/dracut/module-setup.sh
 
 # Run this to also take over the functionality of `ostree container` for example.
 # Only needed for OS/distros that have callers invoking `ostree container` and not bootc.
@@ -80,22 +79,9 @@ install-ostree-hooks:
 	  ln -sf ../../../bin/bootc $(DESTDIR)$(prefix)/libexec/libostree/ext/$$x; \
 	done
 
-# Install code in the initramfs, off by default except in builds from git main right now
-# Also the systemd unit hardcodes /usr so we give up the farce of supporting $(prefix)
-install-initramfs:
-	install -D -m 0644 -t $(DESTDIR)/usr/lib/systemd/system crates/initramfs/*.service
-	install -D -m 0755 target/release/bootc-initramfs-setup $(DESTDIR)/usr/lib/bootc/initramfs-setup
-
-# Install initramfs files, including dracut module
-install-initramfs-dracut: install-initramfs
-	install -D -m 0755 -t $(DESTDIR)/usr/lib/dracut/modules.d/51bootc crates/initramfs/dracut/module-setup.sh
-
 # Install the main binary, the ostree hooks, and the integration test suite.
 install-all: install install-ostree-hooks
 	install -D -m 0755 target/release/tests-integration $(DESTDIR)$(prefix)/bin/bootc-integration-tests
-
-bin-archive: all
-	$(MAKE) install DESTDIR=tmp-install && $(TAR_REPRODUCIBLE) --zstd -C tmp-install -cf target/bootc.tar.zst . && rm tmp-install -rf
 
 build-unit-tests:
 	cargo t --no-run

@@ -17,7 +17,16 @@ variant := env("BOOTC_variant", "ostree")
 base := env("BOOTC_base", "quay.io/centos-bootc/centos-bootc:stream10")
 
 testimage_label := "bootc.testimage=1"
-base_buildargs := "--jobs 4 --label=" + testimage_label
+# We used to have --jobs=4 here but sometimes that'd hit this
+# ```
+#   [2/3] STEP 2/2: RUN --mount=type=bind,from=context,target=/run/context <<EORUN (set -xeuo pipefail...)
+#   --> Using cache b068d42ac7491067cf5fafcaaf2f09d348e32bb752a22c85bbb87f266409554d
+#   --> b068d42ac749
+#   + cd /run/context/
+#   /bin/sh: line 3: cd: /run/context/: Permission denied
+# ```
+# TODO: Gather more info and file a buildah bug
+base_buildargs := ""
 buildargs := "--build-arg=base=" + base + " --build-arg=variant=" + variant
 
 # Build the container image from current sources.
@@ -27,9 +36,37 @@ build:
     podman build {{base_buildargs}} -t localhost/bootc-bin {{buildargs}} .
     ./tests/build-sealed {{variant}} localhost/bootc-bin localhost/bootc
 
+# Build a sealed image from current sources.
+build-sealed:
+    @just --justfile {{justfile()}} variant=composefs-sealeduki-sdboot build
+
+# Build packages (e.g. RPM) using a container buildroot
+_packagecontainer:
+    #!/bin/bash
+    set -xeuo pipefail
+    # Compute version from git (matching xtask.rs gitrev logic)
+    if VERSION=$(git describe --tags --exact-match 2>/dev/null); then
+        VERSION="${VERSION#v}"
+        VERSION="${VERSION//-/.}"
+    else
+        COMMIT=$(git rev-parse HEAD | cut -c1-10)
+        COMMIT_TS=$(git show -s --format=%ct)
+        TIMESTAMP=$(date -u -d @${COMMIT_TS} +%Y%m%d%H%M)
+        VERSION="${TIMESTAMP}.g${COMMIT}"
+    fi
+    echo "Building RPM with version: ${VERSION}"
+    podman build {{base_buildargs}} {{buildargs}} --build-arg=pkgversion=${VERSION} -t localhost/bootc-pkg --target=build .
+
+# Build a packages (e.g. RPM) into target/
+# Any old packages will be removed.
+package: _packagecontainer
+    mkdir -p target
+    rm -vf target/*.rpm
+    podman run --rm localhost/bootc-pkg tar -C /out/ -cf - . | tar -C target/ -xvf -
+
 # This container image has additional testing content and utilities
 build-integration-test-image: build
-    cd hack && podman build {{base_buildargs}} -t localhost/bootc-integration-bin {{buildargs}} -f Containerfile .
+    cd hack && podman build {{base_buildargs}} -t localhost/bootc-integration-bin -f Containerfile .
     ./tests/build-sealed {{variant}} localhost/bootc-integration-bin localhost/bootc-integration
     # Keep these in sync with what's used in hack/lbi
     podman pull -q --retry 5 --retry-delay 5s quay.io/curl/curl:latest quay.io/curl/curl-base:latest registry.access.redhat.com/ubi9/podman:latest

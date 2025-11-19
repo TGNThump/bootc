@@ -203,17 +203,34 @@ pub(crate) async fn fetch_layer<'a>(
     tracing::debug!("fetching {}", layer.digest());
     let layer_index = manifest.layers().iter().position(|x| x == layer).unwrap();
     let (blob, driver, size);
-    let media_type: oci_image::MediaType;
+    let mut media_type: oci_image::MediaType;
     match transport_src {
-        Transport::ContainerStorage => {
-            let layer_info = layer_info
-                .ok_or_else(|| anyhow!("skopeo too old to pull from containers-storage"))?;
+        // Both containers-storage and docker-daemon store layers uncompressed in their
+        // local storage, even though the manifest may indicate they are compressed.
+        // We need to use the actual media type from layer_info to avoid decompression errors.
+        Transport::ContainerStorage | Transport::DockerDaemon => {
+            let layer_info = layer_info.ok_or_else(|| {
+                anyhow!("skopeo too old to pull from containers-storage or docker-daemon")
+            })?;
             let n_layers = layer_info.len();
             let layer_blob = layer_info.get(layer_index).ok_or_else(|| {
                 anyhow!("blobid position {layer_index} exceeds diffid count {n_layers}")
             })?;
             size = layer_blob.size;
             media_type = layer_blob.media_type.clone();
+
+            // docker-daemon stores layers uncompressed even when the media type
+            // indicates gzip compression. Translate to the uncompressed variant.
+            if transport_src == Transport::DockerDaemon {
+                if let oci_image::MediaType::Other(t) = &media_type {
+                    if t.as_str() == "application/vnd.docker.image.rootfs.diff.tar.gzip" {
+                        media_type = oci_image::MediaType::Other(
+                            "application/vnd.docker.image.rootfs.diff.tar".to_string(),
+                        );
+                    }
+                }
+            }
+
             (blob, driver) = proxy.get_blob(img, &layer_blob.digest, size).await?;
         }
         _ => {

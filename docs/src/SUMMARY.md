@@ -58,12 +58,14 @@
 
 - [bootc image](experimental-bootc-image.md)
 - [composefs backend](experimental-composefs.md)
+- [`man bootc-root-setup.service`](man/bootc-root-setup.service.5.md)
 - [fsck](experimental-fsck.md)
 - [install reset](experimental-install-reset.md)
 - [--progress-fd](experimental-progress-fd.md)
 
 # More information
 
+- [Packaging and integration](packaging-and-integration.md)
 - [Package manager integration](package-managers.md)
 - [Relationship with other projects](relationships.md)
 - [Relationship with OCI artifacs](relationship-oci-artifacts.md)

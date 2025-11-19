@@ -33,7 +33,6 @@ use rustix::{mount::MountFlags, path::Arg};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::bootc_composefs::status::get_sorted_grub_uki_boot_entries;
 use crate::composefs_consts::{TYPE1_ENT_PATH, TYPE1_ENT_PATH_STAGED};
 use crate::parsers::bls_config::{BLSConfig, BLSConfigType};
 use crate::parsers::grub_menuconfig::MenuEntry;
@@ -46,12 +45,12 @@ use crate::{
     bootc_composefs::state::{get_booted_bls, write_composefs_state},
     bootloader::esp_in,
 };
+use crate::{bootc_composefs::status::get_sorted_grub_uki_boot_entries, install::PostFetchState};
 use crate::{
     composefs_consts::{
         BOOT_LOADER_ENTRIES, COMPOSEFS_CMDLINE, ORIGIN_KEY_BOOT, ORIGIN_KEY_BOOT_DIGEST,
         STAGED_BOOT_LOADER_ENTRIES, STATE_DIR_ABS, USER_CFG, USER_CFG_STAGED,
     },
-    discoverable_partition_specification::this_arch_root,
     install::RW_KARG,
     spec::{Bootloader, Host},
 };
@@ -78,7 +77,14 @@ pub(crate) const SYSTEMD_UKI_DIR: &str = "EFI/Linux/bootc";
 
 pub(crate) enum BootSetupType<'a> {
     /// For initial setup, i.e. install to-disk
-    Setup((&'a RootSetup, &'a State, &'a ComposefsFilesystem)),
+    Setup(
+        (
+            &'a RootSetup,
+            &'a State,
+            &'a PostFetchState,
+            &'a ComposefsFilesystem,
+        ),
+    ),
     /// For `bootc upgrade`
     Upgrade((&'a Storage, &'a ComposefsFilesystem, &'a Host)),
 }
@@ -379,7 +385,7 @@ pub(crate) fn setup_composefs_bls_boot(
     let id_hex = id.to_hex();
 
     let (root_path, esp_device, cmdline_refs, fs, bootloader) = match setup_type {
-        BootSetupType::Setup((root_setup, state, fs)) => {
+        BootSetupType::Setup((root_setup, state, postfetch, fs)) => {
             // root_setup.kargs has [root=UUID=<UUID>, "rw"]
             let mut cmdline_options = Cmdline::new();
 
@@ -401,7 +407,7 @@ pub(crate) fn setup_composefs_bls_boot(
                 esp_part.node.clone(),
                 cmdline_options,
                 fs,
-                state.detected_bootloader.clone(),
+                postfetch.detected_bootloader.clone(),
             )
         }
 
@@ -412,10 +418,7 @@ pub(crate) fn setup_composefs_bls_boot(
             (
                 Utf8PathBuf::from("/sysroot"),
                 get_esp_partition(&sysroot_parent)?.0,
-                Cmdline::from(format!(
-                    "root=UUID={} {RW_KARG} {COMPOSEFS_CMDLINE}={id_hex}",
-                    this_arch_root()
-                )),
+                Cmdline::from(format!("{RW_KARG} {COMPOSEFS_CMDLINE}={id_hex}")),
                 fs,
                 bootloader,
             )
@@ -859,7 +862,7 @@ pub(crate) fn setup_composefs_uki_boot(
     entries: Vec<ComposefsBootEntry<Sha512HashValue>>,
 ) -> Result<()> {
     let (root_path, esp_device, bootloader, is_insecure_from_opts, uki_addons) = match setup_type {
-        BootSetupType::Setup((root_setup, state, ..)) => {
+        BootSetupType::Setup((root_setup, state, postfetch, ..)) => {
             state.require_no_kargs_for_uki()?;
 
             let esp_part = esp_in(&root_setup.device_info)?;
@@ -867,7 +870,7 @@ pub(crate) fn setup_composefs_uki_boot(
             (
                 root_setup.physical_root_path.clone(),
                 esp_part.node.clone(),
-                state.detected_bootloader.clone(),
+                postfetch.detected_bootloader.clone(),
                 state.composefs_options.insecure,
                 state.composefs_options.uki_addon.as_ref(),
             )
@@ -969,6 +972,18 @@ pub(crate) fn setup_composefs_boot(
     state: &State,
     image_id: &str,
 ) -> Result<()> {
+    let repo = open_composefs_repo(&root_setup.physical_root)?;
+    let mut fs = create_composefs_filesystem(&repo, image_id, None)?;
+    let entries = fs.transform_for_boot(&repo)?;
+    let id = fs.commit_image(&repo, None)?;
+    let mounted_fs = Dir::reopen_dir(
+        &repo
+            .mount(&id.to_hex())
+            .context("Failed to mount composefs image")?,
+    )?;
+
+    let postfetch = PostFetchState::new(state, &mounted_fs)?;
+
     let boot_uuid = root_setup
         .get_boot_uuid()?
         .or(root_setup.rootfs_uuid.as_deref())
@@ -977,7 +992,7 @@ pub(crate) fn setup_composefs_boot(
     if cfg!(target_arch = "s390x") {
         // TODO: Integrate s390x support into install_via_bootupd
         crate::bootloader::install_via_zipl(&root_setup.device_info, boot_uuid)?;
-    } else if state.detected_bootloader == Bootloader::Grub {
+    } else if postfetch.detected_bootloader == Bootloader::Grub {
         crate::bootloader::install_via_bootupd(
             &root_setup.device_info,
             &root_setup.physical_root_path,
@@ -993,13 +1008,6 @@ pub(crate) fn setup_composefs_boot(
         )?;
     }
 
-    let repo = open_composefs_repo(&root_setup.physical_root)?;
-
-    let mut fs = create_composefs_filesystem(&repo, image_id, None)?;
-
-    let entries = fs.transform_for_boot(&repo)?;
-    let id = fs.commit_image(&repo, None)?;
-
     let Some(entry) = entries.iter().next() else {
         anyhow::bail!("No boot entries!");
     };
@@ -1010,7 +1018,7 @@ pub(crate) fn setup_composefs_boot(
     match boot_type {
         BootType::Bls => {
             let digest = setup_composefs_bls_boot(
-                BootSetupType::Setup((&root_setup, &state, &fs)),
+                BootSetupType::Setup((&root_setup, &state, &postfetch, &fs)),
                 repo,
                 &id,
                 entry,
@@ -1019,7 +1027,7 @@ pub(crate) fn setup_composefs_boot(
             boot_digest = Some(digest);
         }
         BootType::Uki => setup_composefs_uki_boot(
-            BootSetupType::Setup((&root_setup, &state, &fs)),
+            BootSetupType::Setup((&root_setup, &state, &postfetch, &fs)),
             repo,
             &id,
             entries,

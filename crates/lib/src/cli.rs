@@ -123,7 +123,7 @@ pub(crate) struct SwitchOpts {
     #[clap(long = "soft-reboot")]
     pub(crate) soft_reboot: Option<SoftRebootMode>,
 
-    /// The transport; e.g. oci, oci-archive, containers-storage.  Defaults to `registry`.
+    /// The transport; e.g. registry, oci, oci-archive, docker-daemon, containers-storage.  Defaults to `registry`.
     #[clap(long, default_value = "registry")]
     pub(crate) transport: String,
 
@@ -1336,10 +1336,12 @@ async fn run_from_opt(opt: Opt) -> Result<()> {
         }
         Opt::Edit(opts) => edit(opts).await,
         Opt::UsrOverlay => {
-            let storage = &get_storage().await?;
-            match storage.kind()? {
-                BootedStorageKind::Ostree(_) => usroverlay().await,
-                BootedStorageKind::Composefs(_) => composefs_usr_overlay(),
+            use crate::store::Environment;
+            let env = Environment::detect()?;
+            match env {
+                Environment::OstreeBooted => usroverlay().await,
+                Environment::ComposefsBooted(_) => composefs_usr_overlay(),
+                _ => anyhow::bail!("usroverlay only applies on booted hosts"),
             }
         }
         Opt::Container(opts) => match opts {
